@@ -36,31 +36,25 @@ DATA_DIR = Path("data")
 FILES = [DATA_DIR / "parte_1.csv.gz", DATA_DIR / "parte_2.csv.gz"]
 
 # -----------------------------
-# FAST START GATE
+# FAST START GATE (sin sidebar)
 # -----------------------------
-# Idea: en cold-start, Streamlit Cloud a veces falla el primer health-check.
-# Si importamos plotly/pandas al inicio, tardamos más -> aumenta la probabilidad de "Oh no".
-# Por eso, la app renderiza algo rápido y SOLO luego carga librerías pesadas y datos.
-
 if "data_ready" not in st.session_state:
-    st.session_state.data_ready = False
-
-with st.sidebar:
-    st.header("⚙️ Inicio")
-    auto = st.toggle("Auto-cargar al abrir", value=True)
-    if st.button("📥 Cargar / recargar datos", type="primary"):
-        st.session_state.data_ready = True
-
-if auto:
-    st.session_state.data_ready = True
+    st.session_state.data_ready = True  # auto-cargar por defecto
 
 st.title("📊 Dashboard de Ventas")
 
-# Si el servidor viene “en frío”, esto se pinta rápido y evita timeouts.
-st.caption("Si la app acaba de despertarse, la primera carga puede tardar. Esta pantalla evita fallos en el arranque.")
+# Controles arriba (sin sidebar)
+cA, cB, cC = st.columns([1, 1, 2], gap="small")
+with cA:
+    auto = st.toggle("Auto-cargar", value=True)
+with cB:
+    if st.button("📥 Cargar / recargar", type="primary"):
+        st.session_state.data_ready = True
+with cC:
+    st.write("")  # espacio para que quede bonito
 
-if not st.session_state.data_ready:
-    st.info("Pulsa **📥 Cargar / recargar datos** para comenzar.")
+if not auto and not st.session_state.data_ready:
+    st.info("Pulsa **📥 Cargar / recargar** para comenzar.")
     st.stop()
 
 # -----------------------------
@@ -81,11 +75,13 @@ def fmt_int(x) -> str:
     except Exception:
         return "—"
 
+
 def fmt_float(x) -> str:
     try:
         return f"{float(x):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except Exception:
         return "—"
+
 
 def safe_nunique(s: pd.Series) -> int:
     try:
@@ -93,24 +89,63 @@ def safe_nunique(s: pd.Series) -> int:
     except Exception:
         return 0
 
+
 def ensure_cols(df: pd.DataFrame) -> pd.DataFrame:
     expected = [
-        "id", "date", "store_nbr", "family", "sales", "onpromotion",
-        "holiday_type", "locale", "locale_name", "description", "transferred",
-        "dcoilwtico", "city", "state", "store_type", "cluster", "transactions",
-        "year", "month", "week", "quarter", "day_of_week",
+        "id",
+        "date",
+        "store_nbr",
+        "family",
+        "sales",
+        "onpromotion",
+        "holiday_type",
+        "locale",
+        "locale_name",
+        "description",
+        "transferred",
+        "dcoilwtico",
+        "city",
+        "state",
+        "store_type",
+        "cluster",
+        "transactions",
+        "year",
+        "month",
+        "week",
+        "quarter",
+        "day_of_week",
     ]
     for c in expected:
         if c not in df.columns:
             df[c] = np.nan
     return df
 
-USECOLS = set([
-    "id", "date", "store_nbr", "family", "sales", "onpromotion",
-    "holiday_type", "locale", "locale_name", "description", "transferred",
-    "dcoilwtico", "city", "state", "store_type", "cluster", "transactions",
-    "year", "month", "week", "quarter", "day_of_week",
-])
+
+USECOLS = {
+    "id",
+    "date",
+    "store_nbr",
+    "family",
+    "sales",
+    "onpromotion",
+    "holiday_type",
+    "locale",
+    "locale_name",
+    "description",
+    "transferred",
+    "dcoilwtico",
+    "city",
+    "state",
+    "store_type",
+    "cluster",
+    "transactions",
+    "year",
+    "month",
+    "week",
+    "quarter",
+    "day_of_week",
+}
+
 
 def _read_gz_csv(path: Path) -> pd.DataFrame:
     # gzip.open (robusto en Cloud)
@@ -120,6 +155,7 @@ def _read_gz_csv(path: Path) -> pd.DataFrame:
             low_memory=False,
             usecols=lambda c: (c in USECOLS) or (c == "Unnamed: 0"),
         )
+
 
 @st.cache_data(show_spinner=False)
 def load_data(files: list[Path]) -> pd.DataFrame:
@@ -158,7 +194,7 @@ def load_data(files: list[Path]) -> pd.DataFrame:
                 if df["day_of_week"].isna().all():
                     df["day_of_week"] = df["date"].dt.day_name()
 
-            dow_order = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+            dow_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
             df["day_of_week"] = pd.Categorical(df["day_of_week"], categories=dow_order, ordered=True)
 
             df["is_promo"] = df["onpromotion"] > 0
@@ -171,67 +207,20 @@ def load_data(files: list[Path]) -> pd.DataFrame:
 
     raise RuntimeError(f"Error cargando datos tras varios intentos: {last_err}")
 
+
 # -----------------------------
 # Load
 # -----------------------------
-with st.spinner("Cargando datos (puede tardar en cold-start)..."):
+with st.spinner("Cargando datos..."):
     df = load_data(FILES)
 
-st.markdown(
-    f"<div class='small-note'>Fuentes: <b>{FILES[0].name}</b> + <b>{FILES[1].name}</b> · "
-    f"Filas totales: <b>{fmt_int(len(df))}</b></div>",
-    unsafe_allow_html=True,
-)
-
-min_date = df["date"].min()
-max_date = df["date"].max()
-
-# -----------------------------
-# Sidebar filters
-# -----------------------------
-with st.sidebar:
-    st.header("🔎 Filtros globales")
-
-    if pd.isna(min_date) or pd.isna(max_date):
-        st.warning("No hay fechas válidas en `date`. Se desactiva el filtro temporal.")
-        date_range = None
-    else:
-        date_range = st.date_input(
-            "Rango de fechas",
-            value=(min_date.date(), max_date.date()),
-            min_value=min_date.date(),
-            max_value=max_date.date(),
-        )
-
-    years = sorted(df["year"].dropna().unique().tolist())
-    states = sorted(df["state"].dropna().astype(str).unique().tolist())
-    families = sorted(df["family"].dropna().astype(str).unique().tolist())
-
-    years_sel = st.multiselect("Años", years, default=years)
-    states_sel = st.multiselect("Estados", states, default=states[: min(8, len(states))])
-    fam_sel = st.multiselect("Familias", families, default=[])
-
-    st.caption("Tip: deja Familias vacío para ver todo.")
-
-df_f = df.copy()
-
-if date_range and len(date_range) == 2:
-    d0 = pd.to_datetime(date_range[0])
-    d1 = pd.to_datetime(date_range[1])
-    df_f = df_f[(df_f["date"] >= d0) & (df_f["date"] <= d1)]
-if years_sel:
-    df_f = df_f[df_f["year"].isin(years_sel)]
-if states_sel:
-    df_f = df_f[df_f["state"].astype(str).isin(states_sel)]
-if fam_sel:
-    df_f = df_f[df_f["family"].astype(str).isin(fam_sel)]
+# Sin filtros laterales: trabajamos sobre todo el dataset
+df_f = df
 
 # -----------------------------
 # Tabs
 # -----------------------------
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["1) Visión global", "2) Tiendas", "3) Estados", "4) Estacionalidad"]
-)
+tab1, tab2, tab3, tab4 = st.tabs(["1) Visión global", "2) Tiendas", "3) Estados", "4) Estacionalidad"])
 
 with tab1:
     st.header("📌 Visión global")
@@ -289,7 +278,7 @@ with tab2:
     st.header("🏬 Análisis por tienda")
     stores = sorted(df_f["store_nbr"].dropna().unique().tolist())
     if not stores:
-        st.info("No hay tiendas con los filtros actuales.")
+        st.info("No hay tiendas disponibles.")
     else:
         left, right = st.columns([0.35, 0.65], gap="large")
         with left:
@@ -304,6 +293,7 @@ with tab2:
 
             st.markdown("")
             st.subheader("🧩 Mix de familias (Top 8)")
+            # Pie chart -> BAR HORIZONTAL (más claro con muchas categorías)
             mix = (
                 df_s.groupby("family", observed=False)["sales"]
                 .sum(min_count=1)
@@ -311,9 +301,9 @@ with tab2:
                 .head(8)
                 .reset_index()
             )
-            fig = px.pie(mix, names="family", values="sales", hole=0.45)
-            fig.update_layout(height=330, margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(fig, width="stretch")
+            fig_mix = px.bar(mix, x="sales", y="family", orientation="h")
+            fig_mix.update_layout(height=330, margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig_mix, width="stretch")
 
         with right:
             st.subheader("📅 Ventas por año")
@@ -347,7 +337,7 @@ with tab3:
     st.header("🗺️ Análisis por estado")
     states = sorted(df_f["state"].dropna().astype(str).unique().tolist())
     if not states:
-        st.info("No hay estados con los filtros actuales.")
+        st.info("No hay estados disponibles.")
     else:
         cL, cR = st.columns([0.35, 0.65], gap="large")
         with cL:
@@ -478,6 +468,3 @@ with tab4:
     fig4 = px.bar(promo_cmp, x="promo", y="sales")
     fig4.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
     st.plotly_chart(fig4, width="stretch")
-
-st.markdown("---")
-st.caption("Robustez: lazy imports + gzip.open + cache + reintentos.")
