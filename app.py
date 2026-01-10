@@ -56,9 +56,9 @@ st.markdown("""
 def load_data():
     """Carga y combina los datos de los archivos comprimidos"""
     try:
-        # Intentar leer directamente los archivos .gz
-        df1 = pd.read_csv('parte_1.csv.gz', compression='gzip')
-        df2 = pd.read_csv('parte_2.csv.gz', compression='gzip')
+        # Intentar leer directamente los archivos .gz desde la carpeta data
+        df1 = pd.read_csv('data/parte_1.csv.gz', compression='gzip')
+        df2 = pd.read_csv('data/parte_2.csv.gz', compression='gzip')
         
         # Combinar los dataframes
         df = pd.concat([df1, df2], ignore_index=True)
@@ -74,7 +74,7 @@ def load_data():
     
     except Exception as e:
         st.error(f"Error al cargar los datos: {str(e)}")
-        st.info("Verifica que los archivos parte_1.csv.gz y parte_2.csv.gz estén en el directorio correcto")
+        st.info("Verifica que los archivos parte_1.csv.gz y parte_2.csv.gz estén en la carpeta 'data'")
         return None
 
 # Cargar datos
