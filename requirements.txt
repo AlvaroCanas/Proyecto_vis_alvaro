@@ -1,5 +1,6 @@
-streamlit>=1.31
+streamlit>=1.52
 pandas>=2.1
 numpy>=1.26
-matplotlib>=3.7
 pyarrow>=14
+plotly>=5.18
+statsmodels>=0.14
