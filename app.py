@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
+import gzip
+
+import numpy as np
+import pandas as pd
 import streamlit as st
+import plotly.express as px
 
 # -----------------------------
 # Page config + light styling
@@ -18,7 +24,6 @@ st.markdown(
       .block-container { padding-top: 1.2rem; padding-bottom: 2.5rem; }
       h1, h2, h3 { letter-spacing: -0.2px; }
       [data-testid="stMetricValue"] { font-size: 1.55rem; }
-      .small-note { opacity: .75; font-size: .9rem; }
       .card {
         border: 1px solid rgba(255,255,255,0.10);
         border-radius: 16px;
@@ -34,37 +39,6 @@ st.markdown(
 
 DATA_DIR = Path("data")
 FILES = [DATA_DIR / "parte_1.csv.gz", DATA_DIR / "parte_2.csv.gz"]
-
-# -----------------------------
-# FAST START GATE (sin sidebar)
-# -----------------------------
-if "data_ready" not in st.session_state:
-    st.session_state.data_ready = True  # auto-cargar por defecto
-
-st.title("📊 Dashboard de Ventas")
-
-# Controles arriba (sin sidebar)
-cA, cB, cC = st.columns([1, 1, 2], gap="small")
-with cA:
-    auto = st.toggle("Auto-cargar", value=True)
-with cB:
-    if st.button("📥 Cargar / recargar", type="primary"):
-        st.session_state.data_ready = True
-with cC:
-    st.write("")  # espacio para que quede bonito
-
-if not auto and not st.session_state.data_ready:
-    st.info("Pulsa **📥 Cargar / recargar** para comenzar.")
-    st.stop()
-
-# -----------------------------
-# HEAVY IMPORTS (lazy)
-# -----------------------------
-import time
-import gzip
-import numpy as np
-import pandas as pd
-import plotly.express as px
 
 # -----------------------------
 # Helpers
@@ -92,28 +66,10 @@ def safe_nunique(s: pd.Series) -> int:
 
 def ensure_cols(df: pd.DataFrame) -> pd.DataFrame:
     expected = [
-        "id",
-        "date",
-        "store_nbr",
-        "family",
-        "sales",
-        "onpromotion",
-        "holiday_type",
-        "locale",
-        "locale_name",
-        "description",
-        "transferred",
-        "dcoilwtico",
-        "city",
-        "state",
-        "store_type",
-        "cluster",
-        "transactions",
-        "year",
-        "month",
-        "week",
-        "quarter",
-        "day_of_week",
+        "id", "date", "store_nbr", "family", "sales", "onpromotion",
+        "holiday_type", "locale", "locale_name", "description", "transferred",
+        "dcoilwtico", "city", "state", "store_type", "cluster", "transactions",
+        "year", "month", "week", "quarter", "day_of_week",
     ]
     for c in expected:
         if c not in df.columns:
@@ -122,33 +78,15 @@ def ensure_cols(df: pd.DataFrame) -> pd.DataFrame:
 
 
 USECOLS = {
-    "id",
-    "date",
-    "store_nbr",
-    "family",
-    "sales",
-    "onpromotion",
-    "holiday_type",
-    "locale",
-    "locale_name",
-    "description",
-    "transferred",
-    "dcoilwtico",
-    "city",
-    "state",
-    "store_type",
-    "cluster",
-    "transactions",
-    "year",
-    "month",
-    "week",
-    "quarter",
-    "day_of_week",
+    "id", "date", "store_nbr", "family", "sales", "onpromotion",
+    "holiday_type", "locale", "locale_name", "description", "transferred",
+    "dcoilwtico", "city", "state", "store_type", "cluster", "transactions",
+    "year", "month", "week", "quarter", "day_of_week",
 }
 
 
 def _read_gz_csv(path: Path) -> pd.DataFrame:
-    # gzip.open (robusto en Cloud)
+    # gzip.open suele ser más robusto en Cloud que confiar en autodetección
     with gzip.open(path, "rt", encoding="utf-8") as f:
         return pd.read_csv(
             f,
@@ -163,13 +101,16 @@ def load_data(files: list[Path]) -> pd.DataFrame:
     if missing:
         raise FileNotFoundError("No encuentro estos ficheros en /data:\n- " + "\n- ".join(missing))
 
-    last_err = None
+    last_err: Exception | None = None
+
+    # Reintentos suaves (a veces Cloud monta /data con un pelín de delay)
     for _ in range(3):
         try:
             dfs = []
             for f in files:
                 if f.stat().st_size == 0:
                     raise ValueError(f"Fichero vacío (0 bytes): {f}")
+
                 part = _read_gz_csv(f)
                 part["__source__"] = f.name
                 dfs.append(part)
@@ -177,11 +118,13 @@ def load_data(files: list[Path]) -> pd.DataFrame:
             df = pd.concat(dfs, ignore_index=True)
             df = ensure_cols(df)
 
+            # Tipos
             df["date"] = pd.to_datetime(df["date"], errors="coerce")
             df["sales"] = pd.to_numeric(df["sales"], errors="coerce")
             df["transactions"] = pd.to_numeric(df["transactions"], errors="coerce")
             df["onpromotion"] = pd.to_numeric(df["onpromotion"], errors="coerce").fillna(0)
 
+            # Derivadas desde date si faltan
             if df["date"].notna().any():
                 if df["year"].isna().all():
                     df["year"] = df["date"].dt.year
@@ -199,31 +142,48 @@ def load_data(files: list[Path]) -> pd.DataFrame:
 
             df["is_promo"] = df["onpromotion"] > 0
             df["has_holiday"] = df["holiday_type"].notna() & (df["holiday_type"].astype(str).str.lower() != "none")
+
             return df
 
         except Exception as e:
             last_err = e
-            time.sleep(1.5)
+            time.sleep(1.0)
 
     raise RuntimeError(f"Error cargando datos tras varios intentos: {last_err}")
 
 
 # -----------------------------
-# Load
+# Main (con manejo de errores para NO crashear el proceso)
 # -----------------------------
-with st.spinner("Cargando datos..."):
-    df = load_data(FILES)
+st.title("📊 Dashboard de Ventas")
 
-# Sin filtros laterales: trabajamos sobre todo el dataset
-df_f = df
+try:
+    with st.spinner("Cargando datos..."):
+        df = load_data(FILES)
+except Exception as e:
+    st.error(
+        "La app no ha podido cargar los ficheros de `data/`.\n\n"
+        "Revisa que `data/parte_1.csv.gz` y `data/parte_2.csv.gz` existen en GitHub "
+        "y que no estén vacíos."
+    )
+    st.exception(e)
+    st.stop()
+
+df_f = df  # sin filtros laterales, trabajamos con todo
 
 # -----------------------------
 # Tabs
 # -----------------------------
-tab1, tab2, tab3, tab4 = st.tabs(["1) Visión global", "2) Tiendas", "3) Estados", "4) Estacionalidad"])
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["1) Visión global", "2) Tiendas", "3) Estados", "4) Estacionalidad"]
+)
 
+# -----------------------------
+# TAB 1
+# -----------------------------
 with tab1:
     st.header("📌 Visión global")
+
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("🏬 Nº tiendas", fmt_int(safe_nunique(df_f["store_nbr"])))
     k2.metric("🧺 Nº familias", fmt_int(safe_nunique(df_f["family"])))
@@ -232,8 +192,8 @@ with tab1:
     k4.metric("🗓️ Meses con datos", fmt_int(months_count))
 
     st.markdown("---")
-    c1, c2 = st.columns((1.15, 0.85), gap="large")
 
+    c1, c2 = st.columns((1.15, 0.85), gap="large")
     with c1:
         st.subheader("🏆 Top 10 familias por ventas (total)")
         top_fam = (
@@ -274,13 +234,19 @@ with tab1:
     fig3.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
     st.plotly_chart(fig3, width="stretch")
 
+
+# -----------------------------
+# TAB 2
+# -----------------------------
 with tab2:
     st.header("🏬 Análisis por tienda")
+
     stores = sorted(df_f["store_nbr"].dropna().unique().tolist())
     if not stores:
         st.info("No hay tiendas disponibles.")
     else:
         left, right = st.columns([0.35, 0.65], gap="large")
+
         with left:
             store_sel = st.selectbox("Selecciona una tienda", stores, index=0)
             df_s = df_f[df_f["store_nbr"] == store_sel].copy()
@@ -293,7 +259,7 @@ with tab2:
 
             st.markdown("")
             st.subheader("🧩 Mix de familias (Top 8)")
-            # Pie chart -> BAR HORIZONTAL (más claro con muchas categorías)
+            # Pie -> BAR horizontal
             mix = (
                 df_s.groupby("family", observed=False)["sales"]
                 .sum(min_count=1)
@@ -333,13 +299,19 @@ with tab2:
             else:
                 st.info("No hay fechas válidas para construir la serie.")
 
+
+# -----------------------------
+# TAB 3
+# -----------------------------
 with tab3:
     st.header("🗺️ Análisis por estado")
+
     states = sorted(df_f["state"].dropna().astype(str).unique().tolist())
     if not states:
         st.info("No hay estados disponibles.")
     else:
         cL, cR = st.columns([0.35, 0.65], gap="large")
+
         with cL:
             state_sel = st.selectbox("Selecciona un estado", states, index=0)
             df_st = df_f[df_f["state"].astype(str) == state_sel].copy()
@@ -405,8 +377,13 @@ with tab3:
             else:
                 st.info("No hay datos suficientes para esta tabla.")
 
+
+# -----------------------------
+# TAB 4
+# -----------------------------
 with tab4:
     st.header("📈 Estacionalidad")
+
     a, b, c = st.columns(3, gap="large")
 
     with a:
