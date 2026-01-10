@@ -1,384 +1,483 @@
-import time
+from __future__ import annotations
+
 from pathlib import Path
-
-import numpy as np
-import pandas as pd
 import streamlit as st
-import plotly.express as px
 
+# -----------------------------
+# Page config + light styling
+# -----------------------------
+st.set_page_config(
+    page_title="Proyecto VIS | Dashboard",
+    page_icon="📊",
+    layout="wide",
+)
 
-# ----------------------------
-# Page config
-# ----------------------------
-st.set_page_config(page_title="Dashboard Ventas", page_icon="📊", layout="wide")
-
-BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-FILE_1 = DATA_DIR / "parte_1.csv.gz"
-FILE_2 = DATA_DIR / "parte_2.csv.gz"
-FILES = [FILE_1, FILE_2]
-
-
-# ----------------------------
-# Robust file waiting + reading
-# ----------------------------
-def wait_for_files(paths: list[Path], timeout_s: float = 35.0, poll_s: float = 0.5) -> None:
+st.markdown(
     """
-    En Streamlit Cloud a veces el repo/data tarda unos segundos en estar accesible (cold start).
-    Espera hasta que existan los ficheros o lanza un error con info de diagnóstico.
-    """
-    t0 = time.time()
-    while True:
-        missing = [p for p in paths if not p.exists()]
-        if not missing:
-            return
-        if time.time() - t0 > timeout_s:
-            # Diagnóstico útil
-            data_ls = []
-            try:
-                if DATA_DIR.exists():
-                    data_ls = sorted([x.name for x in DATA_DIR.iterdir()])
-            except Exception:
-                pass
+    <style>
+      .block-container { padding-top: 1.2rem; padding-bottom: 2.5rem; }
+      h1, h2, h3 { letter-spacing: -0.2px; }
+      [data-testid="stMetricValue"] { font-size: 1.55rem; }
+      .small-note { opacity: .75; font-size: .9rem; }
+      .card {
+        border: 1px solid rgba(255,255,255,0.10);
+        border-radius: 16px;
+        padding: 14px 16px;
+        background: rgba(255,255,255,0.03);
+      }
+      .stTabs [data-baseweb="tab"] { font-size: 1rem; padding: 0.6rem 1rem; }
+      .stTabs [aria-selected="true"] { font-weight: 700; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-            raise FileNotFoundError(
-                "No han aparecido los ficheros a tiempo.\n"
-                f"Missing: {[m.as_posix() for m in missing]}\n"
-                f"DATA_DIR exists: {DATA_DIR.exists()} ({DATA_DIR.as_posix()})\n"
-                f"Contenido de data/: {data_ls}\n"
-                f"BASE_DIR: {BASE_DIR.as_posix()}"
-            )
-        time.sleep(poll_s)
+DATA_DIR = Path("data")
+FILES = [DATA_DIR / "parte_1.csv.gz", DATA_DIR / "parte_2.csv.gz"]
 
+# -----------------------------
+# FAST START GATE
+# -----------------------------
+# Idea: en cold-start, Streamlit Cloud a veces falla el primer health-check.
+# Si importamos plotly/pandas al inicio, tardamos más -> aumenta la probabilidad de "Oh no".
+# Por eso, la app renderiza algo rápido y SOLO luego carga librerías pesadas y datos.
 
-def read_csv_gz(path: Path) -> pd.DataFrame:
-    # low_memory=False como pediste
-    return pd.read_csv(path, compression="gzip", low_memory=False)
+if "data_ready" not in st.session_state:
+    st.session_state.data_ready = False
 
+with st.sidebar:
+    st.header("⚙️ Inicio")
+    auto = st.toggle("Auto-cargar al abrir", value=True)
+    if st.button("📥 Cargar / recargar datos", type="primary"):
+        st.session_state.data_ready = True
 
-@st.cache_data(show_spinner=False)
-def load_data() -> pd.DataFrame:
-    # Espera a que el filesystem esté listo
-    wait_for_files(FILES)
+if auto:
+    st.session_state.data_ready = True
 
-    df1 = read_csv_gz(FILE_1)
-    df2 = read_csv_gz(FILE_2)
-
-    # Concatenación (mismas columnas)
-    df = pd.concat([df1, df2], ignore_index=True)
-
-    # Tipos
-    if "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-
-    # Derivadas por si acaso
-    if "date" in df.columns and df["date"].notna().any():
-        if "year" not in df.columns:
-            df["year"] = df["date"].dt.year
-        if "month" not in df.columns:
-            df["month"] = df["date"].dt.month
-        if "week" not in df.columns:
-            df["week"] = df["date"].dt.isocalendar().week.astype("Int64")
-        if "day_of_week" not in df.columns:
-            df["day_of_week"] = df["date"].dt.day_name()
-
-    for col in ["sales", "transactions", "onpromotion", "dcoilwtico"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    return df
-
-
-# ----------------------------
-# Plotly defaults (bonito)
-# ----------------------------
-px.defaults.template = "plotly_white"
-px.defaults.width = None
-px.defaults.height = 420
-
-
-def metric_card(col, title, value):
-    col.metric(title, value)
-
-
-def nice_bar(df, x, y, title, color=None):
-    fig = px.bar(df, x=x, y=y, title=title, color=color, text_auto=".2s")
-    fig.update_layout(title_x=0.0, margin=dict(l=20, r=20, t=60, b=20))
-    fig.update_traces(textposition="outside", cliponaxis=False)
-    return fig
-
-
-def nice_line(df, x, y, title):
-    fig = px.line(df, x=x, y=y, title=title, markers=True)
-    fig.update_layout(title_x=0.0, margin=dict(l=20, r=20, t=60, b=20))
-    return fig
-
-
-def nice_hist(series, title, nbins=40):
-    fig = px.histogram(series, nbins=nbins, title=title)
-    fig.update_layout(title_x=0.0, margin=dict(l=20, r=20, t=60, b=20))
-    return fig
-
-
-# ----------------------------
-# App
-# ----------------------------
 st.title("📊 Dashboard de Ventas")
 
-with st.spinner("Cargando datos..."):
+# Si el servidor viene “en frío”, esto se pinta rápido y evita timeouts.
+st.caption("Si la app acaba de despertarse, la primera carga puede tardar. Esta pantalla evita fallos en el arranque.")
+
+if not st.session_state.data_ready:
+    st.info("Pulsa **📥 Cargar / recargar datos** para comenzar.")
+    st.stop()
+
+# -----------------------------
+# HEAVY IMPORTS (lazy)
+# -----------------------------
+import time
+import gzip
+import numpy as np
+import pandas as pd
+import plotly.express as px
+
+# -----------------------------
+# Helpers
+# -----------------------------
+def fmt_int(x) -> str:
     try:
-        df = load_data()
-    except Exception as e:
-        st.error("La app ha fallado al cargar datos. Te dejo diagnóstico para arreglarlo en 1 golpe:")
-        st.exception(e)
-        st.stop()
+        return f"{int(x):,}".replace(",", ".")
+    except Exception:
+        return "—"
 
-# Validación suave
-required_cols = {"store_nbr", "family", "sales", "onpromotion", "state", "transactions", "year", "month", "week", "day_of_week"}
-missing = sorted(list(required_cols - set(df.columns)))
-if missing:
-    st.warning(f"Faltan columnas esperadas: {missing}. Algunas gráficas no se mostrarán.")
+def fmt_float(x) -> str:
+    try:
+        return f"{float(x):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except Exception:
+        return "—"
 
-tab1, tab2, tab3, tab4 = st.tabs(["1) Global", "2) Por tienda", "3) Por estado", "4) Extra"])
+def safe_nunique(s: pd.Series) -> int:
+    try:
+        return int(s.nunique(dropna=True))
+    except Exception:
+        return 0
 
+def ensure_cols(df: pd.DataFrame) -> pd.DataFrame:
+    expected = [
+        "id", "date", "store_nbr", "family", "sales", "onpromotion",
+        "holiday_type", "locale", "locale_name", "description", "transferred",
+        "dcoilwtico", "city", "state", "store_type", "cluster", "transactions",
+        "year", "month", "week", "quarter", "day_of_week",
+    ]
+    for c in expected:
+        if c not in df.columns:
+            df[c] = np.nan
+    return df
 
-# ----------------------------
-# TAB 1 - Global
-# ----------------------------
+USECOLS = set([
+    "id", "date", "store_nbr", "family", "sales", "onpromotion",
+    "holiday_type", "locale", "locale_name", "description", "transferred",
+    "dcoilwtico", "city", "state", "store_type", "cluster", "transactions",
+    "year", "month", "week", "quarter", "day_of_week",
+])
+
+def _read_gz_csv(path: Path) -> pd.DataFrame:
+    # gzip.open (robusto en Cloud)
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        return pd.read_csv(
+            f,
+            low_memory=False,
+            usecols=lambda c: (c in USECOLS) or (c == "Unnamed: 0"),
+        )
+
+@st.cache_data(show_spinner=False)
+def load_data(files: list[Path]) -> pd.DataFrame:
+    missing = [str(f) for f in files if not f.exists()]
+    if missing:
+        raise FileNotFoundError("No encuentro estos ficheros en /data:\n- " + "\n- ".join(missing))
+
+    last_err = None
+    for _ in range(3):
+        try:
+            dfs = []
+            for f in files:
+                if f.stat().st_size == 0:
+                    raise ValueError(f"Fichero vacío (0 bytes): {f}")
+                part = _read_gz_csv(f)
+                part["__source__"] = f.name
+                dfs.append(part)
+
+            df = pd.concat(dfs, ignore_index=True)
+            df = ensure_cols(df)
+
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            df["sales"] = pd.to_numeric(df["sales"], errors="coerce")
+            df["transactions"] = pd.to_numeric(df["transactions"], errors="coerce")
+            df["onpromotion"] = pd.to_numeric(df["onpromotion"], errors="coerce").fillna(0)
+
+            if df["date"].notna().any():
+                if df["year"].isna().all():
+                    df["year"] = df["date"].dt.year
+                if df["month"].isna().all():
+                    df["month"] = df["date"].dt.month
+                if df["quarter"].isna().all():
+                    df["quarter"] = df["date"].dt.quarter
+                if df["week"].isna().all():
+                    df["week"] = df["date"].dt.isocalendar().week.astype("Int64")
+                if df["day_of_week"].isna().all():
+                    df["day_of_week"] = df["date"].dt.day_name()
+
+            dow_order = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+            df["day_of_week"] = pd.Categorical(df["day_of_week"], categories=dow_order, ordered=True)
+
+            df["is_promo"] = df["onpromotion"] > 0
+            df["has_holiday"] = df["holiday_type"].notna() & (df["holiday_type"].astype(str).str.lower() != "none")
+            return df
+
+        except Exception as e:
+            last_err = e
+            time.sleep(1.5)
+
+    raise RuntimeError(f"Error cargando datos tras varios intentos: {last_err}")
+
+# -----------------------------
+# Load
+# -----------------------------
+with st.spinner("Cargando datos (puede tardar en cold-start)..."):
+    df = load_data(FILES)
+
+st.markdown(
+    f"<div class='small-note'>Fuentes: <b>{FILES[0].name}</b> + <b>{FILES[1].name}</b> · "
+    f"Filas totales: <b>{fmt_int(len(df))}</b></div>",
+    unsafe_allow_html=True,
+)
+
+min_date = df["date"].min()
+max_date = df["date"].max()
+
+# -----------------------------
+# Sidebar filters
+# -----------------------------
+with st.sidebar:
+    st.header("🔎 Filtros globales")
+
+    if pd.isna(min_date) or pd.isna(max_date):
+        st.warning("No hay fechas válidas en `date`. Se desactiva el filtro temporal.")
+        date_range = None
+    else:
+        date_range = st.date_input(
+            "Rango de fechas",
+            value=(min_date.date(), max_date.date()),
+            min_value=min_date.date(),
+            max_value=max_date.date(),
+        )
+
+    years = sorted(df["year"].dropna().unique().tolist())
+    states = sorted(df["state"].dropna().astype(str).unique().tolist())
+    families = sorted(df["family"].dropna().astype(str).unique().tolist())
+
+    years_sel = st.multiselect("Años", years, default=years)
+    states_sel = st.multiselect("Estados", states, default=states[: min(8, len(states))])
+    fam_sel = st.multiselect("Familias", families, default=[])
+
+    st.caption("Tip: deja Familias vacío para ver todo.")
+
+df_f = df.copy()
+
+if date_range and len(date_range) == 2:
+    d0 = pd.to_datetime(date_range[0])
+    d1 = pd.to_datetime(date_range[1])
+    df_f = df_f[(df_f["date"] >= d0) & (df_f["date"] <= d1)]
+if years_sel:
+    df_f = df_f[df_f["year"].isin(years_sel)]
+if states_sel:
+    df_f = df_f[df_f["state"].astype(str).isin(states_sel)]
+if fam_sel:
+    df_f = df_f[df_f["family"].astype(str).isin(fam_sel)]
+
+# -----------------------------
+# Tabs
+# -----------------------------
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["1) Visión global", "2) Tiendas", "3) Estados", "4) Estacionalidad"]
+)
+
 with tab1:
-    st.subheader("📌 Visión global")
+    st.header("📌 Visión global")
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("🏬 Nº tiendas", fmt_int(safe_nunique(df_f["store_nbr"])))
+    k2.metric("🧺 Nº familias", fmt_int(safe_nunique(df_f["family"])))
+    k3.metric("🗺️ Nº estados", fmt_int(safe_nunique(df_f["state"])))
+    months_count = df_f[["year", "month"]].dropna().drop_duplicates().shape[0]
+    k4.metric("🗓️ Meses con datos", fmt_int(months_count))
 
-    c1, c2, c3, c4 = st.columns(4)
-    metric_card(c1, "🏬 Nº total de tiendas", int(df["store_nbr"].nunique()) if "store_nbr" in df.columns else 0)
-    metric_card(c2, "🧺 Nº total de productos (families)", int(df["family"].nunique()) if "family" in df.columns else 0)
-    metric_card(c3, "🗺️ Nº de estados", int(df["state"].nunique()) if "state" in df.columns else 0)
+    st.markdown("---")
+    c1, c2 = st.columns((1.15, 0.85), gap="large")
 
-    if "year" in df.columns and "month" in df.columns:
-        meses = df[["year", "month"]].dropna().drop_duplicates()
-        metric_card(c4, "🗓️ Meses con datos", int(len(meses)))
-    else:
-        metric_card(c4, "🗓️ Meses con datos", 0)
-
-    st.divider()
-    left, right = st.columns(2)
-
-    # Top 10 productos
-    if {"family", "sales"}.issubset(df.columns):
-        top_products = (
-            df.groupby("family", dropna=False)["sales"].sum()
+    with c1:
+        st.subheader("🏆 Top 10 familias por ventas (total)")
+        top_fam = (
+            df_f.groupby("family", observed=False)["sales"]
+            .sum(min_count=1)
             .sort_values(ascending=False)
             .head(10)
             .reset_index()
         )
-        fig = nice_bar(top_products, x="sales", y="family", title="Top 10 productos más vendidos (ventas totales)")
-        fig.update_layout(yaxis_title="", xaxis_title="Ventas")
-        left.plotly_chart(fig, width="stretch")
-    else:
-        left.info("No puedo calcular Top productos: faltan columnas.")
-
-    # Distribución por tienda
-    if {"store_nbr", "sales"}.issubset(df.columns):
-        store_sales = df.groupby("store_nbr")["sales"].sum()
-        fig = nice_hist(store_sales.dropna(), title="Distribución de ventas totales por tienda", nbins=45)
-        fig.update_layout(xaxis_title="Ventas totales por tienda", yaxis_title="Frecuencia")
-        right.plotly_chart(fig, width="stretch")
-    else:
-        right.info("No puedo calcular distribución por tienda: faltan columnas.")
-
-    st.divider()
-    st.subheader("🎯 Promociones")
-
-    if {"store_nbr", "sales", "onpromotion"}.issubset(df.columns):
-        promo_df = df[df["onpromotion"].fillna(0) > 0]
-        promo_rank = (
-            promo_df.groupby("store_nbr")["sales"].sum()
-            .sort_values(ascending=False)
-            .head(10)
-            .reset_index(name="sales_promo")
-        )
-        fig = nice_bar(promo_rank, x="store_nbr", y="sales_promo", title="Top 10 tiendas por ventas en promoción")
-        fig.update_layout(xaxis_title="Tienda", yaxis_title="Ventas en promo")
+        fig = px.bar(top_fam, x="sales", y="family", orientation="h")
+        fig.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(fig, width="stretch")
-    else:
-        st.info("No puedo calcular promociones: faltan columnas.")
 
-    st.divider()
-    st.subheader("🌦️ Estacionalidad (ventas medias)")
+    with c2:
+        st.subheader("🏪 Distribución de ventas por tienda")
+        store_sales = (
+            df_f.groupby("store_nbr", observed=False)["sales"]
+            .sum(min_count=1)
+            .reset_index()
+            .rename(columns={"sales": "sales_total"})
+        )
+        fig2 = px.box(store_sales, y="sales_total", points="outliers")
+        fig2.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig2, width="stretch")
 
-    r1, r2, r3 = st.columns(3)
+    st.markdown("---")
+    st.subheader("🔥 Top 10 tiendas con más ventas en promoción (onpromotion > 0)")
+    promo_by_store = (
+        df_f[df_f["is_promo"]]
+        .groupby("store_nbr", observed=False)["sales"]
+        .sum(min_count=1)
+        .sort_values(ascending=False)
+        .head(10)
+        .reset_index()
+        .rename(columns={"sales": "promo_sales"})
+    )
+    fig3 = px.bar(promo_by_store, x="store_nbr", y="promo_sales")
+    fig3.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
+    st.plotly_chart(fig3, width="stretch")
 
-    # Día semana
-    if {"day_of_week", "sales"}.issubset(df.columns):
-        order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-        dow = df.groupby("day_of_week")["sales"].mean().reset_index(name="sales_mean")
-        dow["day_of_week"] = pd.Categorical(dow["day_of_week"], categories=order, ordered=True)
-        dow = dow.sort_values("day_of_week")
-        fig = nice_bar(dow, x="day_of_week", y="sales_mean", title="Ventas medias por día de la semana")
-        fig.update_layout(xaxis_title="Día", yaxis_title="Ventas medias")
-        r1.plotly_chart(fig, width="stretch")
-    else:
-        r1.info("Faltan columnas para día de la semana.")
-
-    # Semana
-    if {"week", "sales"}.issubset(df.columns):
-        wk = df.dropna(subset=["week"]).groupby("week")["sales"].mean().reset_index(name="sales_mean")
-        fig = nice_line(wk, x="week", y="sales_mean", title="Ventas medias por semana del año")
-        fig.update_layout(xaxis_title="Semana", yaxis_title="Ventas medias")
-        r2.plotly_chart(fig, width="stretch")
-    else:
-        r2.info("Faltan columnas para semana del año.")
-
-    # Mes
-    if {"month", "sales"}.issubset(df.columns):
-        mo = df.dropna(subset=["month"]).groupby("month")["sales"].mean().reset_index(name="sales_mean")
-        fig = nice_line(mo, x="month", y="sales_mean", title="Ventas medias por mes")
-        fig.update_layout(xaxis_title="Mes", yaxis_title="Ventas medias")
-        r3.plotly_chart(fig, width="stretch")
-    else:
-        r3.info("Faltan columnas para mes.")
-
-
-# ----------------------------
-# TAB 2 - Por tienda
-# ----------------------------
 with tab2:
-    st.subheader("🏬 Análisis por tienda")
-
-    if "store_nbr" not in df.columns:
-        st.error("No existe `store_nbr`.")
-        st.stop()
-
-    stores = sorted(df["store_nbr"].dropna().unique().tolist())
-    store_sel = st.selectbox("Selecciona tienda", stores, index=0)
-    dstore = df[df["store_nbr"] == store_sel].copy()
-
-    a, b, c = st.columns(3)
-    a.metric("📦 Ventas totales", float(dstore["sales"].sum(skipna=True)) if "sales" in dstore.columns else 0.0)
-    b.metric("🧺 Productos vendidos (unidades)", float(dstore["sales"].sum(skipna=True)) if "sales" in dstore.columns else 0.0)
-
-    if {"sales", "onpromotion"}.issubset(dstore.columns):
-        promo_units = dstore.loc[dstore["onpromotion"].fillna(0) > 0, "sales"].sum(skipna=True)
-        c.metric("🏷️ Vendidos en promoción", float(promo_units))
+    st.header("🏬 Análisis por tienda")
+    stores = sorted(df_f["store_nbr"].dropna().unique().tolist())
+    if not stores:
+        st.info("No hay tiendas con los filtros actuales.")
     else:
-        c.metric("🏷️ Vendidos en promoción", 0.0)
+        left, right = st.columns([0.35, 0.65], gap="large")
+        with left:
+            store_sel = st.selectbox("Selecciona una tienda", stores, index=0)
+            df_s = df_f[df_f["store_nbr"] == store_sel].copy()
 
-    st.divider()
-    left, right = st.columns(2)
+            st.markdown("<div class='card'>", unsafe_allow_html=True)
+            st.metric("📦 Ventas totales", fmt_float(df_s["sales"].sum(skipna=True)))
+            st.metric("🧾 Transacciones totales", fmt_float(df_s["transactions"].sum(skipna=True)))
+            st.metric("🏷️ Ventas en promo", fmt_float(df_s.loc[df_s["is_promo"], "sales"].sum(skipna=True)))
+            st.markdown("</div>", unsafe_allow_html=True)
 
-    if {"year", "sales"}.issubset(dstore.columns):
-        by_year = dstore.groupby("year")["sales"].sum().reset_index(name="sales_total").sort_values("year")
-        fig = nice_line(by_year, x="year", y="sales_total", title="Ventas totales por año (tienda)")
-        fig.update_layout(xaxis_title="Año", yaxis_title="Ventas")
-        left.plotly_chart(fig, width="stretch")
+            st.markdown("")
+            st.subheader("🧩 Mix de familias (Top 8)")
+            mix = (
+                df_s.groupby("family", observed=False)["sales"]
+                .sum(min_count=1)
+                .sort_values(ascending=False)
+                .head(8)
+                .reset_index()
+            )
+            fig = px.pie(mix, names="family", values="sales", hole=0.45)
+            fig.update_layout(height=330, margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig, width="stretch")
+
+        with right:
+            st.subheader("📅 Ventas por año")
+            by_year = (
+                df_s.groupby("year", observed=False)["sales"]
+                .sum(min_count=1)
+                .reset_index()
+                .sort_values("year")
+            )
+            fig = px.bar(by_year, x="year", y="sales")
+            fig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig, width="stretch")
+
+            st.subheader("📈 Serie mensual (ventas)")
+            if df_s["date"].notna().any():
+                by_month = (
+                    df_s.dropna(subset=["date"])
+                    .set_index("date")["sales"]
+                    .resample("MS")
+                    .sum(min_count=1)
+                    .reset_index()
+                    .rename(columns={"sales": "sales_month"})
+                )
+                fig2 = px.line(by_month, x="date", y="sales_month", markers=True)
+                fig2.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10))
+                st.plotly_chart(fig2, width="stretch")
+            else:
+                st.info("No hay fechas válidas para construir la serie.")
+
+with tab3:
+    st.header("🗺️ Análisis por estado")
+    states = sorted(df_f["state"].dropna().astype(str).unique().tolist())
+    if not states:
+        st.info("No hay estados con los filtros actuales.")
     else:
-        left.info("No puedo dibujar ventas por año: faltan columnas.")
+        cL, cR = st.columns([0.35, 0.65], gap="large")
+        with cL:
+            state_sel = st.selectbox("Selecciona un estado", states, index=0)
+            df_st = df_f[df_f["state"].astype(str) == state_sel].copy()
 
-    if {"family", "sales"}.issubset(dstore.columns):
-        top_store_prod = (
-            dstore.groupby("family")["sales"].sum()
-            .sort_values(ascending=False)
-            .head(10)
+            st.markdown("<div class='card'>", unsafe_allow_html=True)
+            st.metric("🏬 Tiendas en el estado", fmt_int(safe_nunique(df_st["store_nbr"])))
+            st.metric("🧺 Familias vendidas", fmt_int(safe_nunique(df_st["family"])))
+            st.metric("📦 Ventas totales", fmt_float(df_st["sales"].sum(skipna=True)))
+            st.metric("🧾 Transacciones", fmt_float(df_st["transactions"].sum(skipna=True)))
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            st.markdown("")
+            top_f = (
+                df_st.groupby("family", observed=False)["sales"]
+                .sum(min_count=1)
+                .sort_values(ascending=False)
+                .head(1)
+            )
+            st.subheader("🥇 Familia líder")
+            if len(top_f) == 0:
+                st.write("—")
+            else:
+                st.success(f"**{top_f.index[0]}** · ventas: **{fmt_float(top_f.iloc[0])}**")
+
+        with cR:
+            st.subheader("📆 Transacciones por año")
+            tx_year = (
+                df_st.groupby("year", observed=False)["transactions"]
+                .sum(min_count=1)
+                .reset_index()
+                .sort_values("year")
+            )
+            fig = px.bar(tx_year, x="year", y="transactions")
+            fig.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig, width="stretch")
+
+            st.subheader("🏆 Top 10 tiendas por ventas (en el estado)")
+            top_store = (
+                df_st.groupby("store_nbr", observed=False)["sales"]
+                .sum(min_count=1)
+                .sort_values(ascending=False)
+                .head(10)
+                .reset_index()
+            )
+            fig2 = px.bar(top_store, x="store_nbr", y="sales")
+            fig2.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig2, width="stretch")
+
+            st.subheader("🧺 Familia más vendida por tienda (muestra)")
+            by_store_family = (
+                df_st.groupby(["store_nbr", "family"], observed=False)["sales"]
+                .sum(min_count=1)
+                .reset_index()
+            )
+            if not by_store_family.empty:
+                idx = by_store_family.groupby("store_nbr", observed=False)["sales"].idxmax()
+                best = by_store_family.loc[idx].sort_values("sales", ascending=False).head(15)
+                st.dataframe(
+                    best.rename(columns={"family": "top_family", "sales": "top_family_sales"}),
+                    width="stretch",
+                    hide_index=True,
+                )
+            else:
+                st.info("No hay datos suficientes para esta tabla.")
+
+with tab4:
+    st.header("📈 Estacionalidad")
+    a, b, c = st.columns(3, gap="large")
+
+    with a:
+        st.subheader("📅 Ventas medias por día de la semana")
+        dow = (
+            df_f.groupby("day_of_week", observed=False)["sales"]
+            .mean()
+            .reset_index()
+            .sort_values("day_of_week")
+        )
+        fig = px.bar(dow, x="day_of_week", y="sales")
+        fig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig, width="stretch")
+
+    with b:
+        st.subheader("🗓️ Ventas medias por semana (promedio entre años)")
+        weekly = (
+            df_f.dropna(subset=["year", "week"])
+            .groupby(["year", "week"], observed=False)["sales"]
+            .sum(min_count=1)
             .reset_index()
         )
-        fig = nice_bar(top_store_prod, x="sales", y="family", title="Top 10 productos de la tienda")
-        fig.update_layout(yaxis_title="", xaxis_title="Ventas")
-        right.plotly_chart(fig, width="stretch")
-    else:
-        right.info("No puedo mostrar top productos: faltan columnas.")
-
-
-# ----------------------------
-# TAB 3 - Por estado
-# ----------------------------
-with tab3:
-    st.subheader("🗺️ Análisis por estado")
-
-    if "state" not in df.columns:
-        st.error("No existe `state`.")
-        st.stop()
-
-    states = sorted(df["state"].dropna().unique().tolist())
-    state_sel = st.selectbox("Selecciona estado", states, index=0)
-    dstate = df[df["state"] == state_sel].copy()
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("🧾 Transacciones totales", float(dstate["transactions"].sum(skipna=True)) if "transactions" in dstate.columns else 0.0)
-    col2.metric("🏬 Nº tiendas en el estado", int(dstate["store_nbr"].nunique()) if "store_nbr" in dstate.columns else 0)
-
-    if {"family", "sales"}.issubset(dstate.columns) and len(dstate):
-        best_prod = dstate.groupby("family")["sales"].sum().sort_values(ascending=False).head(1)
-        col3.metric("🥇 Producto más vendido", str(best_prod.index[0]) if len(best_prod) else "N/A")
-    else:
-        col3.metric("🥇 Producto más vendido", "N/A")
-
-    st.divider()
-    l, r = st.columns(2)
-
-    if {"year", "transactions"}.issubset(dstate.columns):
-        tx_year = dstate.groupby("year")["transactions"].sum().reset_index(name="transactions_total").sort_values("year")
-        fig = nice_line(tx_year, x="year", y="transactions_total", title="Transacciones por año (estado)")
-        fig.update_layout(xaxis_title="Año", yaxis_title="Transacciones")
-        l.plotly_chart(fig, width="stretch")
-    else:
-        l.info("No puedo dibujar transacciones por año: faltan columnas.")
-
-    if {"store_nbr", "sales"}.issubset(dstate.columns):
-        rank_stores = (
-            dstate.groupby("store_nbr")["sales"].sum()
-            .sort_values(ascending=False)
-            .head(10)
-            .reset_index(name="sales_total")
+        weekly_mean = (
+            weekly.groupby("week", observed=False)["sales"]
+            .mean()
+            .reset_index()
+            .sort_values("week")
         )
-        fig = nice_bar(rank_stores, x="store_nbr", y="sales_total", title="Top 10 tiendas por ventas (estado)")
-        fig.update_layout(xaxis_title="Tienda", yaxis_title="Ventas")
-        r.plotly_chart(fig, width="stretch")
-    else:
-        r.info("No puedo dibujar ranking de tiendas: faltan columnas.")
+        fig2 = px.line(weekly_mean, x="week", y="sales", markers=True)
+        fig2.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig2, width="stretch")
 
-
-# ----------------------------
-# TAB 4 - Extra
-# ----------------------------
-with tab4:
-    st.subheader("✨ Extra (sin pie charts)")
-
-    c1, c2 = st.columns(2)
-
-    # Promos vs ventas
-    if {"store_nbr", "sales", "onpromotion"}.issubset(df.columns):
-        by_store = df.groupby("store_nbr").agg(
-            sales_total=("sales", "sum"),
-            promo_sales=("sales", lambda s: s[df.loc[s.index, "onpromotion"].fillna(0) > 0].sum()),
-        ).reset_index()
-        by_store["promo_ratio"] = np.where(by_store["sales_total"] > 0, by_store["promo_sales"] / by_store["sales_total"], 0.0)
-
-        fig = px.scatter(
-            by_store,
-            x="promo_ratio",
-            y="sales_total",
-            hover_data=["store_nbr", "promo_sales"],
-            title="Dependencia de promociones: ratio promo vs ventas totales",
-            trendline="ols",
+    with c:
+        st.subheader("📆 Ventas medias por mes (promedio entre años)")
+        monthly = (
+            df_f.dropna(subset=["year", "month"])
+            .groupby(["year", "month"], observed=False)["sales"]
+            .sum(min_count=1)
+            .reset_index()
         )
-        fig.update_layout(xaxis_title="Ratio ventas en promo", yaxis_title="Ventas totales", title_x=0.0)
-        c1.plotly_chart(fig, width="stretch")
-    else:
-        c1.info("No puedo calcular promos vs ventas: faltan columnas.")
-
-    # Segmentación por store_type (si existe)
-    if {"store_type", "sales"}.issubset(df.columns):
-        seg = df.groupby("store_type")["sales"].sum().sort_values(ascending=False).reset_index(name="sales_total")
-        fig = nice_bar(seg, x="store_type", y="sales_total", title="Ventas totales por tipo de tienda")
-        fig.update_layout(xaxis_title="Tipo de tienda", yaxis_title="Ventas")
-        c2.plotly_chart(fig, width="stretch")
-    else:
-        c2.info("No existe `store_type` o faltan columnas para segmentación.")
-
-    st.divider()
-    with st.expander("📌 Diagnóstico cold start"):
-        st.write(
-            "Si antes te salía 'Oh no' y con reboot iba, casi seguro era porque el script leía `data/*.csv.gz` "
-            "antes de que el repo/data estuviera disponible.\n\n"
-            "Este app.py lo evita esperando (con timeout) a que existan los ficheros y usando rutas absolutas "
-            "basadas en `__file__`."
+        monthly_mean = (
+            monthly.groupby("month", observed=False)["sales"]
+            .mean()
+            .reset_index()
+            .sort_values("month")
         )
+        fig3 = px.line(monthly_mean, x="month", y="sales", markers=True)
+        fig3.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig3, width="stretch")
+
+    st.markdown("---")
+    st.subheader("🏷️ Promo vs No promo (ventas medias)")
+    promo_cmp = (
+        df_f.assign(promo=np.where(df_f["is_promo"], "Promo", "No promo"))
+        .groupby("promo", observed=False)["sales"]
+        .mean()
+        .reset_index()
+    )
+    fig4 = px.bar(promo_cmp, x="promo", y="sales")
+    fig4.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
+    st.plotly_chart(fig4, width="stretch")
+
+st.markdown("---")
+st.caption("Robustez: lazy imports + gzip.open + cache + reintentos.")
