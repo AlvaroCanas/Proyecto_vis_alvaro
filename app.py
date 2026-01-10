@@ -11,17 +11,6 @@ import os
 # Page config + light styling
 # -----------------------------
 
-st.write("DEBUG: listing /mount/src")
-st.write(os.listdir("."))
-
-st.write("DEBUG: listing data/")
-if Path("data").exists():
-    st.write([p.name for p in Path("data").iterdir()])
-    for name in ["parte_1.csv.gz", "parte_2.csv.gz"]:
-        p = Path("data") / name
-        st.write(name, "exists:", p.exists(), "size:", p.stat().st_size if p.exists() else None)
-else:
-    st.write("NO data folder")
 
 st.set_page_config(
     page_title="Proyecto VIS | Dashboard",
