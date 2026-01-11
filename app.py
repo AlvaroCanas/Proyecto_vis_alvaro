@@ -1,447 +1,250 @@
-from __future__ import annotations
+'''
+Para realizar este proyecto he leído y seguido los siguientes recursos:
 
-from pathlib import Path
-import time
-import gzip
+    -   https://docs.streamlit.io/get-started/tutorials (de aquí he aprendido sobre todo del tutorial básico de Streamlit 'First Steps')
 
-import numpy as np
-import pandas as pd
+    -   https://docs.streamlit.io/deploy/streamlit-community-cloud/get-started (para aprender a usar Streamlit Cloud y publicar mi proyecto)
+
+Me he enfocado en con el menor código y la mayor simpleza posible dar el mejor resultado, espero que os guste.
+'''
 import streamlit as st
+import pandas as pd
 import plotly.express as px
 
-# -----------------------------
-# Page config + light styling
-# -----------------------------
-st.set_page_config(
-    page_title="Proyecto VIS | Dashboard",
-    page_icon="📊",
-    layout="wide",
-)
+# hacemos la config basica de la pagina, layout wide para que ocupe todo el ancho
+st.set_page_config(page_title="Dashboard Ventas", layout="wide")
 
-st.markdown(
-    """
-    <style>
-      .block-container { padding-top: 1.2rem; padding-bottom: 2.5rem; }
-      h1, h2, h3 { letter-spacing: -0.2px; }
-      [data-testid="stMetricValue"] { font-size: 1.55rem; }
-      .card {
-        border: 1px solid rgba(255,255,255,0.10);
-        border-radius: 16px;
-        padding: 14px 16px;
-        background: rgba(255,255,255,0.03);
-      }
-      .stTabs [data-baseweb="tab"] { font-size: 1rem; padding: 0.6rem 1rem; }
-      .stTabs [aria-selected="true"] { font-weight: 700; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+# aplicamos un css custom para las tarjetas de metricas (afecta a toda la página, al final no lo uso mucho pero queda bien)
+st.markdown("""
+<style>
+    .metric-card {background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+        padding: 20px; border-radius: 10px; color: white; text-align: center; margin: 5px;}
+    .metric-card h2 {font-size: 2.5em; margin: 0;}
+    .metric-card p {margin: 5px 0 0 0; opacity: 0.9;}
+</style>
+""", unsafe_allow_html=True)
 
-DATA_DIR = Path("data")
-FILES = [DATA_DIR / "parte_1.csv.gz", DATA_DIR / "parte_2.csv.gz"]
-
-# -----------------------------
-# Helpers
-# -----------------------------
-def fmt_int(x) -> str:
-    try:
-        return f"{int(x):,}".replace(",", ".")
-    except Exception:
-        return "—"
-
-
-def fmt_float(x) -> str:
-    try:
-        return f"{float(x):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except Exception:
-        return "—"
-
-
-def safe_nunique(s: pd.Series) -> int:
-    try:
-        return int(s.nunique(dropna=True))
-    except Exception:
-        return 0
-
-
-def ensure_cols(df: pd.DataFrame) -> pd.DataFrame:
-    expected = [
-        "id", "date", "store_nbr", "family", "sales", "onpromotion",
-        "holiday_type", "locale", "locale_name", "description", "transferred",
-        "dcoilwtico", "city", "state", "store_type", "cluster", "transactions",
-        "year", "month", "week", "quarter", "day_of_week",
-    ]
-    for c in expected:
-        if c not in df.columns:
-            df[c] = np.nan
+# creamos la funcion para cargar los datos, mejor usar el decorador para el cache para que no recargue de nuevo (es muy lento si no)
+@st.cache_data
+def load_data():
+    df = pd.concat([pd.read_csv("parte_1.csv.gz"), pd.read_csv("parte_2.csv.gz")], ignore_index=True)   # juntamos los dos csv porque el original era muy grande
+    df['date'] = pd.to_datetime(df['date'])
     return df
 
+df = load_data()
 
-USECOLS = {
-    "id", "date", "store_nbr", "family", "sales", "onpromotion",
-    "holiday_type", "locale", "locale_name", "description", "transferred",
-    "dcoilwtico", "city", "state", "store_type", "cluster", "transactions",
-    "year", "month", "week", "quarter", "day_of_week",
-}
+st.title("Dashboard de Ventas - IMAT Alimentación (🛒)")
 
+# las 4 pestañas principales
+tab1, tab2, tab3, tab4 = st.tabs(["Visión Global (📊)", "Por Tienda (🏪)", "Por Estado (📍)", "Extra (✨)"])
 
-def _read_gz_csv(path: Path) -> pd.DataFrame:
-    # gzip.open suele ser más robusto en Cloud que confiar en autodetección
-    with gzip.open(path, "rt", encoding="utf-8") as f:
-        return pd.read_csv(
-            f,
-            low_memory=False,
-            usecols=lambda c: (c in USECOLS) or (c == "Unnamed: 0"),
-        )
-
-
-@st.cache_data(show_spinner=False)
-def load_data(files: list[Path]) -> pd.DataFrame:
-    missing = [str(f) for f in files if not f.exists()]
-    if missing:
-        raise FileNotFoundError("No encuentro estos ficheros en /data:\n- " + "\n- ".join(missing))
-
-    last_err: Exception | None = None
-
-    # Reintentos suaves (a veces Cloud monta /data con un pelín de delay)
-    for _ in range(3):
-        try:
-            dfs = []
-            for f in files:
-                if f.stat().st_size == 0:
-                    raise ValueError(f"Fichero vacío (0 bytes): {f}")
-
-                part = _read_gz_csv(f)
-                part["__source__"] = f.name
-                dfs.append(part)
-
-            df = pd.concat(dfs, ignore_index=True)
-            df = ensure_cols(df)
-
-            # Tipos
-            df["date"] = pd.to_datetime(df["date"], errors="coerce")
-            df["sales"] = pd.to_numeric(df["sales"], errors="coerce")
-            df["transactions"] = pd.to_numeric(df["transactions"], errors="coerce")
-            df["onpromotion"] = pd.to_numeric(df["onpromotion"], errors="coerce").fillna(0)
-
-            # Derivadas desde date si faltan
-            if df["date"].notna().any():
-                if df["year"].isna().all():
-                    df["year"] = df["date"].dt.year
-                if df["month"].isna().all():
-                    df["month"] = df["date"].dt.month
-                if df["quarter"].isna().all():
-                    df["quarter"] = df["date"].dt.quarter
-                if df["week"].isna().all():
-                    df["week"] = df["date"].dt.isocalendar().week.astype("Int64")
-                if df["day_of_week"].isna().all():
-                    df["day_of_week"] = df["date"].dt.day_name()
-
-            dow_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-            df["day_of_week"] = pd.Categorical(df["day_of_week"], categories=dow_order, ordered=True)
-
-            df["is_promo"] = df["onpromotion"] > 0
-            df["has_holiday"] = df["holiday_type"].notna() & (df["holiday_type"].astype(str).str.lower() != "none")
-
-            return df
-
-        except Exception as e:
-            last_err = e
-            time.sleep(1.0)
-
-    raise RuntimeError(f"Error cargando datos tras varios intentos: {last_err}")
-
-
-# -----------------------------
-# Main (con manejo de errores para NO crashear el proceso)
-# -----------------------------
-st.title("📊 Dashboard de Ventas")
-
-try:
-    with st.spinner("Cargando datos..."):
-        df = load_data(FILES)
-except Exception as e:
-    st.error(
-        "La app no ha podido cargar los ficheros de `data/`.\n\n"
-        "Revisa que `data/parte_1.csv.gz` y `data/parte_2.csv.gz` existen en GitHub "
-        "y que no estén vacíos."
-    )
-    st.exception(e)
-    st.stop()
-
-df_f = df  # sin filtros laterales, trabajamos con todo
-
-# -----------------------------
-# Tabs
-# -----------------------------
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["1) Visión global", "2) Tiendas", "3) Estados", "4) Estacionalidad"]
-)
-
-# -----------------------------
-# TAB 1
-# -----------------------------
+#  PESTAÑA 1: vision general de todo
 with tab1:
-    st.header("📌 Visión global")
+    st.header("Visión Global de Ventas")
+    
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Nº Tiendas", df['store_nbr'].nunique())
+    c2.metric("Nº Productos", df['family'].nunique())
+    c3.metric("Nº Estados", df['state'].nunique())
+    c4.metric("Nº Meses registrados", df[['year','month']].drop_duplicates().shape[0])
+    
+    st.divider()  # linea separadora
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # top productos, barras horizontales ordenadas
+        st.subheader("Top 10 Productos Más Vendidos (🏆)")
 
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("🏬 Nº tiendas", fmt_int(safe_nunique(df_f["store_nbr"])))
-    k2.metric("🧺 Nº familias", fmt_int(safe_nunique(df_f["family"])))
-    k3.metric("🗺️ Nº estados", fmt_int(safe_nunique(df_f["state"])))
-    months_count = df_f[["year", "month"]].dropna().drop_duplicates().shape[0]
-    k4.metric("🗓️ Meses con datos", fmt_int(months_count))
+        top_prod = df.groupby('family')['sales'].sum().nlargest(10).reset_index()
+        fig = px.bar(top_prod, x='sales', y='family', orientation='h', color='sales', color_continuous_scale='Viridis')
 
-    st.markdown("---")
+        fig.update_layout(yaxis={'categoryorder':'total ascending'}, showlegend=False)
 
-    c1, c2 = st.columns((1.15, 0.85), gap="large")
-    with c1:
-        st.subheader("🏆 Top 10 familias por ventas (total)")
-        top_fam = (
-            df_f.groupby("family", observed=False)["sales"]
-            .sum(min_count=1)
-            .sort_values(ascending=False)
-            .head(10)
-            .reset_index()
-        )
-        fig = px.bar(top_fam, x="sales", y="family", orientation="h")
-        fig.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        # treemap de tiendas, se ve mejor que un pie chart jeje
+        st.subheader("Distribución Ventas por Tienda - de la 1 a la 54 (🏪)")
 
-    with c2:
-        st.subheader("🏪 Distribución de ventas por tienda")
-        store_sales = (
-            df_f.groupby("store_nbr", observed=False)["sales"]
-            .sum(min_count=1)
-            .reset_index()
-            .rename(columns={"sales": "sales_total"})
-        )
-        fig2 = px.box(store_sales, y="sales_total", points="outliers")
-        fig2.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig2, width="stretch")
+        ventas_tienda = df.groupby('store_nbr')['sales'].sum().reset_index()
+        fig = px.treemap(ventas_tienda, path=['store_nbr'], values='sales', color='sales', color_continuous_scale='Blues')
 
-    st.markdown("---")
-    st.subheader("🔥 Top 10 tiendas con más ventas en promoción (onpromotion > 0)")
-    promo_by_store = (
-        df_f[df_f["is_promo"]]
-        .groupby("store_nbr", observed=False)["sales"]
-        .sum(min_count=1)
-        .sort_values(ascending=False)
-        .head(10)
-        .reset_index()
-        .rename(columns={"sales": "promo_sales"})
-    )
-    fig3 = px.bar(promo_by_store, x="store_nbr", y="promo_sales")
-    fig3.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig3, width="stretch")
+        st.plotly_chart(fig, use_container_width=True)
+
+    
+    # Y creamos la otra fila de graficos
+    col3, col4 = st.columns(2)
+    
+    with col3:
+        # tiendas que mas venden en promo
+        st.subheader("Top 10 Tiendas en Promociones (🎯)")
 
 
-# -----------------------------
-# TAB 2
-# -----------------------------
+        promo = df[df['onpromotion'] > 0].groupby('store_nbr')['sales'].sum().nlargest(10).reset_index()
+        promo = promo.sort_values('sales', ascending=True)  # ordenamos pñara que el mayor quede arriba
+        promo['store_nbr'] = 'Tienda ' + promo['store_nbr'].astype(str)
+
+        fig = px.bar(promo, x='sales', y='store_nbr', orientation='h', color='sales', color_continuous_scale='Plasma')
+        fig.update_layout(yaxis={'categoryorder':'array', 'categoryarray': promo['store_nbr'].tolist()})
+
+
+        st.plotly_chart(fig, use_container_width=True)
+
+
+    with col4:
+        # ventas por dia, ordenamos los dias manualmente
+        st.subheader("Ventas por Día de la Semana (📆)")
+
+        dia = df.groupby('day_of_week')['sales'].mean().reset_index()
+        orden = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
+        dia['day_of_week'] = pd.Categorical(dia['day_of_week'], categories=orden, ordered=True)
+        dia = dia.sort_values('day_of_week')
+        fig = px.bar(dia, x='day_of_week', y='sales', color='sales', color_continuous_scale='Turbo')
+
+        st.plotly_chart(fig, use_container_width=True)
+    
+
+    # parte de la estacionalidad
+    st.subheader("Estacionalidad de Ventas (📈)")
+    col5, col6 = st.columns(2)
+    
+
+    with col5:
+        # ventas por semana del año
+        semana = df.groupby('week')['sales'].mean().reset_index()
+        fig = px.line(semana, x='week', y='sales', markers=True, title="Ventas Medias por Semana")
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col6:
+        # ventas por mes
+        mes = df.groupby('month')['sales'].mean().reset_index()
+        fig = px.line(mes, x='month', y='sales', markers=True, title="Ventas Medias por Mes")
+        st.plotly_chart(fig, use_container_width=True)
+
+# PESTAÑA 2: analisis individual por tienda
 with tab2:
-    st.header("🏬 Análisis por tienda")
+    st.header("Análisis por Tienda")
+    tienda = st.selectbox("Selecciona una tienda:", sorted(df['store_nbr'].unique()))
+    df_tienda = df[df['store_nbr'] == tienda]  # filtramos los datos
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        # evolucion anual de esa tienda
+        st.subheader("Ventas por Año (📅)")
+        anual = df_tienda.groupby('year')['sales'].sum().reset_index().sort_values('year')
+        fig = px.bar(anual, x='year', y='sales', color='sales', color_continuous_scale='Blues')
 
-    stores = sorted(df_f["store_nbr"].dropna().unique().tolist())
-    if not stores:
-        st.info("No hay tiendas disponibles.")
-    else:
-        left, right = st.columns([0.35, 0.65], gap="large")
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        # que productos vende mas
+        st.subheader("Productos Vendidos (📦)")
+        prod = df_tienda.groupby('family')['sales'].sum().nlargest(10).reset_index()
+        fig = px.bar(prod, x='sales', y='family', orientation='h', color='sales')
+        fig.update_layout(yaxis={'categoryorder':'total ascending'})
+        
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col3:
+        # productos en promocion de esa tienda
+        st.subheader("Productos en Promoción (🎯)")
+        promo = df_tienda[df_tienda['onpromotion'] > 0].groupby('family')['sales'].sum().nlargest(10).reset_index()
+        fig = px.bar(promo, x='sales', y='family', orientation='h', color='sales', color_continuous_scale='Oranges')
+        fig.update_layout(yaxis={'categoryorder':'total ascending'})
 
-        with left:
-            store_sel = st.selectbox("Selecciona una tienda", stores, index=0)
-            df_s = df_f[df_f["store_nbr"] == store_sel].copy()
+        st.plotly_chart(fig, use_container_width=True)
 
-            st.markdown("<div class='card'>", unsafe_allow_html=True)
-            st.metric("📦 Ventas totales", fmt_float(df_s["sales"].sum(skipna=True)))
-            st.metric("🧾 Transacciones totales", fmt_float(df_s["transactions"].sum(skipna=True)))
-            st.metric("🏷️ Ventas en promo", fmt_float(df_s.loc[df_s["is_promo"], "sales"].sum(skipna=True)))
-            st.markdown("</div>", unsafe_allow_html=True)
-
-            st.markdown("")
-            st.subheader("🧩 Mix de familias (Top 8)")
-            # Pie -> BAR horizontal
-            mix = (
-                df_s.groupby("family", observed=False)["sales"]
-                .sum(min_count=1)
-                .sort_values(ascending=False)
-                .head(8)
-                .reset_index()
-            )
-            fig_mix = px.bar(mix, x="sales", y="family", orientation="h")
-            fig_mix.update_layout(height=330, margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(fig_mix, width="stretch")
-
-        with right:
-            st.subheader("📅 Ventas por año")
-            by_year = (
-                df_s.groupby("year", observed=False)["sales"]
-                .sum(min_count=1)
-                .reset_index()
-                .sort_values("year")
-            )
-            fig = px.bar(by_year, x="year", y="sales")
-            fig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(fig, width="stretch")
-
-            st.subheader("📈 Serie mensual (ventas)")
-            if df_s["date"].notna().any():
-                by_month = (
-                    df_s.dropna(subset=["date"])
-                    .set_index("date")["sales"]
-                    .resample("MS")
-                    .sum(min_count=1)
-                    .reset_index()
-                    .rename(columns={"sales": "sales_month"})
-                )
-                fig2 = px.line(by_month, x="date", y="sales_month", markers=True)
-                fig2.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10))
-                st.plotly_chart(fig2, width="stretch")
-            else:
-                st.info("No hay fechas válidas para construir la serie.")
-
-
-# -----------------------------
-# TAB 3
-# -----------------------------
+# PESTAÑA 3: analisis por estado/region
 with tab3:
-    st.header("🗺️ Análisis por estado")
+    st.header("Análisis por Estado")
+    estado = st.selectbox("Selecciona un estado:", sorted(df['state'].unique()))
+    df_estado = df[df['state'] == estado]
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        # transacciones por año en ese estado
+        st.subheader("Transacciones por Año (📅)")
 
-    states = sorted(df_f["state"].dropna().astype(str).unique().tolist())
-    if not states:
-        st.info("No hay estados disponibles.")
-    else:
-        cL, cR = st.columns([0.35, 0.65], gap="large")
+        trans = df_estado.groupby('year')['transactions'].sum().reset_index().sort_values('year')
+        fig = px.bar(trans, x='year', y='transactions', color='transactions', color_continuous_scale='Greens')
 
-        with cL:
-            state_sel = st.selectbox("Selecciona un estado", states, index=0)
-            df_st = df_f[df_f["state"].astype(str) == state_sel].copy()
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        # ranking de tiendas del estado
+        st.subheader("Tiendas con Más Ventas (🏪)")
 
-            st.markdown("<div class='card'>", unsafe_allow_html=True)
-            st.metric("🏬 Tiendas en el estado", fmt_int(safe_nunique(df_st["store_nbr"])))
-            st.metric("🧺 Familias vendidas", fmt_int(safe_nunique(df_st["family"])))
-            st.metric("📦 Ventas totales", fmt_float(df_st["sales"].sum(skipna=True)))
-            st.metric("🧾 Transacciones", fmt_float(df_st["transactions"].sum(skipna=True)))
-            st.markdown("</div>", unsafe_allow_html=True)
+        tiendas = df_estado.groupby('store_nbr')['sales'].sum().nlargest(10).reset_index()
+        fig = px.bar(tiendas, x='store_nbr', y='sales', color='sales', color_continuous_scale='Purples')
 
-            st.markdown("")
-            top_f = (
-                df_st.groupby("family", observed=False)["sales"]
-                .sum(min_count=1)
-                .sort_values(ascending=False)
-                .head(1)
-            )
-            st.subheader("🥇 Familia líder")
-            if len(top_f) == 0:
-                st.write("—")
-            else:
-                st.success(f"**{top_f.index[0]}** · ventas: **{fmt_float(top_f.iloc[0])}**")
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col3:
+        # producto top del estado
+        st.subheader("Producto Más Vendido (🏆)")
 
-        with cR:
-            st.subheader("📆 Transacciones por año")
-            tx_year = (
-                df_st.groupby("year", observed=False)["transactions"]
-                .sum(min_count=1)
-                .reset_index()
-                .sort_values("year")
-            )
-            fig = px.bar(tx_year, x="year", y="transactions")
-            fig.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(fig, width="stretch")
+        prod = df_estado.groupby('family')['sales'].sum().nlargest(10).reset_index()
+        fig = px.bar(prod, x='sales', y='family', orientation='h', color='sales', color_continuous_scale='Reds')
+        fig.update_layout(yaxis={'categoryorder':'total ascending'})
 
-            st.subheader("🏆 Top 10 tiendas por ventas (en el estado)")
-            top_store = (
-                df_st.groupby("store_nbr", observed=False)["sales"]
-                .sum(min_count=1)
-                .sort_values(ascending=False)
-                .head(10)
-                .reset_index()
-            )
-            fig2 = px.bar(top_store, x="store_nbr", y="sales")
-            fig2.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(fig2, width="stretch")
+        st.plotly_chart(fig, use_container_width=True)
 
-            st.subheader("🧺 Familia más vendida por tienda (muestra)")
-            by_store_family = (
-                df_st.groupby(["store_nbr", "family"], observed=False)["sales"]
-                .sum(min_count=1)
-                .reset_index()
-            )
-            if not by_store_family.empty:
-                idx = by_store_family.groupby("store_nbr", observed=False)["sales"].idxmax()
-                best = by_store_family.loc[idx].sort_values("sales", ascending=False).head(15)
-                st.dataframe(
-                    best.rename(columns={"family": "top_family", "sales": "top_family_sales"}),
-                    width="stretch",
-                    hide_index=True,
-                )
-            else:
-                st.info("No hay datos suficientes para esta tabla.")
-
-
-# -----------------------------
-# TAB 4
-# -----------------------------
+# PESTAÑA 4: graficos extras (pata ver mejor que pasa)
 with tab4:
-    st.header("📈 Estacionalidad")
+    st.header("Estadísticas Adicionales - Mejorar la comprensión (✨)")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # evolucion temporal con area (queda bien)
+        st.subheader("Evolución Mensual de Ventas (📈)")
 
-    a, b, c = st.columns(3, gap="large")
+        evol = df.groupby(['year', 'month'])['sales'].sum().reset_index()
+        evol['fecha'] = pd.to_datetime(evol[['year', 'month']].assign(day=1))
+        fig = px.area(evol, x='fecha', y='sales', color_discrete_sequence=['#667eea'])
 
-    with a:
-        st.subheader("📅 Ventas medias por día de la semana")
-        dow = (
-            df_f.groupby("day_of_week", observed=False)["sales"]
-            .mean()
-            .reset_index()
-            .sort_values("day_of_week")
-        )
-        fig = px.bar(dow, x="day_of_week", y="sales")
-        fig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        # top ciudades
+        st.subheader("Ventas por Ciudad (🌆)")
 
-    with b:
-        st.subheader("🗓️ Ventas medias por semana (promedio entre años)")
-        weekly = (
-            df_f.dropna(subset=["year", "week"])
-            .groupby(["year", "week"], observed=False)["sales"]
-            .sum(min_count=1)
-            .reset_index()
-        )
-        weekly_mean = (
-            weekly.groupby("week", observed=False)["sales"]
-            .mean()
-            .reset_index()
-            .sort_values("week")
-        )
-        fig2 = px.line(weekly_mean, x="week", y="sales", markers=True)
-        fig2.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig2, width="stretch")
+        ciudad = df.groupby('city')['sales'].sum().nlargest(10).reset_index()
+        fig = px.bar(ciudad, x='sales', y='city', orientation='h', color='sales', color_continuous_scale='Teal')
+        fig.update_layout(yaxis={'categoryorder':'total ascending'}, showlegend=False)
 
-    with c:
-        st.subheader("📆 Ventas medias por mes (promedio entre años)")
-        monthly = (
-            df_f.dropna(subset=["year", "month"])
-            .groupby(["year", "month"], observed=False)["sales"]
-            .sum(min_count=1)
-            .reset_index()
-        )
-        monthly_mean = (
-            monthly.groupby("month", observed=False)["sales"]
-            .mean()
-            .reset_index()
-            .sort_values("month")
-        )
-        fig3 = px.line(monthly_mean, x="month", y="sales", markers=True)
-        fig3.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig3, width="stretch")
+        st.plotly_chart(fig, use_container_width=True)
+    
+    col3, col4 = st.columns(2)
+    
+    with col3:
+        # como afectan los festivos a las ventas
+        st.subheader("Impacto de Festivos en Ventas (🎉)")
+        festivo = df.groupby('holiday_type')['sales'].mean().reset_index().sort_values('sales')
+        fig = px.bar(festivo, x='sales', y='holiday_type', orientation='h', color='holiday_type', color_discrete_sequence=px.colors.qualitative.Pastel)
+        fig.update_layout(showlegend=False)
 
-    st.markdown("---")
-    st.subheader("🏷️ Promo vs No promo (ventas medias)")
-    promo_cmp = (
-        df_f.assign(promo=np.where(df_f["is_promo"], "Promo", "No promo"))
-        .groupby("promo", observed=False)["sales"]
-        .mean()
-        .reset_index()
-    )
-    fig4 = px.bar(promo_cmp, x="promo", y="sales")
-    fig4.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig4, width="stretch")
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col4:
+        # tipos de tienda (A, B, C, D, E)
+        st.subheader("Ventas por Tipo de Tienda (🏪)")
+
+        tipo = df.groupby('store_type')['sales'].sum().reset_index().sort_values('sales')
+        fig = px.bar(tipo, x='store_type', y='sales', color='store_type', color_discrete_sequence=px.colors.qualitative.Set2)
+        fig.update_layout(showlegend=False)
+
+        st.plotly_chart(fig, use_container_width=True)
+    
+
+    # treemap grande de estados, con selector de año
+    st.subheader("Ventas por Estado (📅)")
+
+    año_sel = st.selectbox("Selecciona año:", sorted(df['year'].unique()), key='año_treemap')
+    treemap = df[df['year'] == año_sel].groupby('state')['sales'].sum().reset_index()
+    fig = px.treemap(treemap, path=['state'], values='sales', color='sales', color_continuous_scale='RdYlGn')
+    
+    st.plotly_chart(fig, use_container_width=True)
