@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-import time
 import gzip
+import time
 
 import numpy as np
 import pandas as pd
@@ -10,7 +10,7 @@ import streamlit as st
 import plotly.express as px
 
 # -----------------------------
-# Page config + light styling
+# Config + estilo
 # -----------------------------
 st.set_page_config(
     page_title="Proyecto VIS | Dashboard",
@@ -37,8 +37,11 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-DATA_DIR = Path("data")
-FILES = [DATA_DIR / "parte_1.csv.gz", DATA_DIR / "parte_2.csv.gz"]
+# Rutas robustas (NO dependen del working dir)
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+F1 = DATA_DIR / "parte_1.csv.gz"
+F2 = DATA_DIR / "parte_2.csv.gz"
 
 # -----------------------------
 # Helpers
@@ -86,7 +89,7 @@ USECOLS = {
 
 
 def _read_gz_csv(path: Path) -> pd.DataFrame:
-    # gzip.open suele ser más robusto en Cloud que confiar en autodetección
+    # Lectura robusta usando gzip.open (en Cloud va fino)
     with gzip.open(path, "rt", encoding="utf-8") as f:
         return pd.read_csv(
             f,
@@ -96,26 +99,25 @@ def _read_gz_csv(path: Path) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def load_data(files: list[Path]) -> pd.DataFrame:
-    missing = [str(f) for f in files if not f.exists()]
-    if missing:
-        raise FileNotFoundError("No encuentro estos ficheros en /data:\n- " + "\n- ".join(missing))
-
-    last_err: Exception | None = None
-
-    # Reintentos suaves (a veces Cloud monta /data con un pelín de delay)
+def load_data() -> pd.DataFrame:
+    # Reintentos suaves (a veces Cloud monta /data con delay)
+    last_err = None
     for _ in range(3):
         try:
-            dfs = []
-            for f in files:
-                if f.stat().st_size == 0:
-                    raise ValueError(f"Fichero vacío (0 bytes): {f}")
+            if not DATA_DIR.exists():
+                raise FileNotFoundError(f"No existe la carpeta: {DATA_DIR}")
 
-                part = _read_gz_csv(f)
-                part["__source__"] = f.name
-                dfs.append(part)
+            missing = [p for p in (F1, F2) if not p.exists()]
+            if missing:
+                raise FileNotFoundError("Faltan ficheros:\n- " + "\n- ".join(map(str, missing)))
 
-            df = pd.concat(dfs, ignore_index=True)
+            if F1.stat().st_size == 0 or F2.stat().st_size == 0:
+                raise ValueError("Algún fichero está vacío (0 bytes).")
+
+            df1 = _read_gz_csv(F1)
+            df2 = _read_gz_csv(F2)
+            df = pd.concat([df1, df2], ignore_index=True)
+
             df = ensure_cols(df)
 
             # Tipos
@@ -124,7 +126,7 @@ def load_data(files: list[Path]) -> pd.DataFrame:
             df["transactions"] = pd.to_numeric(df["transactions"], errors="coerce")
             df["onpromotion"] = pd.to_numeric(df["onpromotion"], errors="coerce").fillna(0)
 
-            # Derivadas desde date si faltan
+            # Derivadas
             if df["date"].notna().any():
                 if df["year"].isna().all():
                     df["year"] = df["date"].dt.year
@@ -141,7 +143,6 @@ def load_data(files: list[Path]) -> pd.DataFrame:
             df["day_of_week"] = pd.Categorical(df["day_of_week"], categories=dow_order, ordered=True)
 
             df["is_promo"] = df["onpromotion"] > 0
-            df["has_holiday"] = df["holiday_type"].notna() & (df["holiday_type"].astype(str).str.lower() != "none")
 
             return df
 
@@ -153,26 +154,36 @@ def load_data(files: list[Path]) -> pd.DataFrame:
 
 
 # -----------------------------
-# Main (con manejo de errores para NO crashear el proceso)
+# Main
 # -----------------------------
 st.title("📊 Dashboard de Ventas")
 
 try:
     with st.spinner("Cargando datos..."):
-        df = load_data(FILES)
+        df = load_data()
 except Exception as e:
     st.error(
-        "La app no ha podido cargar los ficheros de `data/`.\n\n"
-        "Revisa que `data/parte_1.csv.gz` y `data/parte_2.csv.gz` existen en GitHub "
-        "y que no estén vacíos."
+        "No he podido cargar los datos.\n\n"
+        "Verifica que existen estos ficheros en GitHub:\n"
+        f"- {F1}\n- {F2}\n\n"
+        "y que NO estén vacíos."
     )
     st.exception(e)
     st.stop()
 
-df_f = df  # sin filtros laterales, trabajamos con todo
+# -----------------------------
+# KPIs
+# -----------------------------
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Filas", fmt_int(len(df)))
+k2.metric("Tiendas", fmt_int(safe_nunique(df["store_nbr"])))
+k3.metric("Familias", fmt_int(safe_nunique(df["family"])))
+k4.metric("Estados", fmt_int(safe_nunique(df["state"])))
+
+st.markdown("---")
 
 # -----------------------------
-# Tabs
+# Tabs (SIN selectbox)
 # -----------------------------
 tab1, tab2, tab3, tab4 = st.tabs(
     ["1) Visión global", "2) Tiendas", "3) Estados", "4) Estacionalidad"]
@@ -184,20 +195,12 @@ tab1, tab2, tab3, tab4 = st.tabs(
 with tab1:
     st.header("📌 Visión global")
 
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("🏬 Nº tiendas", fmt_int(safe_nunique(df_f["store_nbr"])))
-    k2.metric("🧺 Nº familias", fmt_int(safe_nunique(df_f["family"])))
-    k3.metric("🗺️ Nº estados", fmt_int(safe_nunique(df_f["state"])))
-    months_count = df_f[["year", "month"]].dropna().drop_duplicates().shape[0]
-    k4.metric("🗓️ Meses con datos", fmt_int(months_count))
-
-    st.markdown("---")
-
     c1, c2 = st.columns((1.15, 0.85), gap="large")
+
     with c1:
         st.subheader("🏆 Top 10 familias por ventas (total)")
         top_fam = (
-            df_f.groupby("family", observed=False)["sales"]
+            df.groupby("family", observed=False)["sales"]
             .sum(min_count=1)
             .sort_values(ascending=False)
             .head(10)
@@ -208,175 +211,159 @@ with tab1:
         st.plotly_chart(fig, width="stretch")
 
     with c2:
-        st.subheader("🏪 Distribución de ventas por tienda")
-        store_sales = (
-            df_f.groupby("store_nbr", observed=False)["sales"]
-            .sum(min_count=1)
+        st.subheader("🏷️ Promo vs No promo (ventas medias)")
+        promo_cmp = (
+            df.assign(promo=np.where(df["is_promo"], "Promo", "No promo"))
+            .groupby("promo", observed=False)["sales"]
+            .mean()
             .reset_index()
-            .rename(columns={"sales": "sales_total"})
         )
-        fig2 = px.box(store_sales, y="sales_total", points="outliers")
+        fig2 = px.bar(promo_cmp, x="promo", y="sales")
         fig2.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(fig2, width="stretch")
 
     st.markdown("---")
-    st.subheader("🔥 Top 10 tiendas con más ventas en promoción (onpromotion > 0)")
-    promo_by_store = (
-        df_f[df_f["is_promo"]]
-        .groupby("store_nbr", observed=False)["sales"]
-        .sum(min_count=1)
-        .sort_values(ascending=False)
-        .head(10)
-        .reset_index()
-        .rename(columns={"sales": "promo_sales"})
-    )
-    fig3 = px.bar(promo_by_store, x="store_nbr", y="promo_sales")
-    fig3.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig3, width="stretch")
 
+    st.subheader("📈 Evolución mensual total (ventas)")
+    if df["date"].notna().any():
+        monthly = (
+            df.dropna(subset=["date"])
+            .set_index("date")["sales"]
+            .resample("MS")
+            .sum(min_count=1)
+            .reset_index()
+            .rename(columns={"sales": "sales_month"})
+        )
+        fig3 = px.line(monthly, x="date", y="sales_month", markers=True)
+        fig3.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig3, width="stretch")
+    else:
+        st.info("No hay fechas válidas para la serie temporal.")
 
 # -----------------------------
 # TAB 2
 # -----------------------------
 with tab2:
-    st.header("🏬 Análisis por tienda")
+    st.header("🏬 Tiendas (rankings)")
 
-    stores = sorted(df_f["store_nbr"].dropna().unique().tolist())
-    if not stores:
-        st.info("No hay tiendas disponibles.")
+    c1, c2 = st.columns(2, gap="large")
+
+    with c1:
+        st.subheader("🏆 Top 15 tiendas por ventas totales")
+        top_store = (
+            df.groupby("store_nbr", observed=False)["sales"]
+            .sum(min_count=1)
+            .sort_values(ascending=False)
+            .head(15)
+            .reset_index()
+        )
+        fig = px.bar(top_store, x="store_nbr", y="sales")
+        fig.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig, width="stretch")
+
+    with c2:
+        st.subheader("🔥 Top 15 tiendas con más ventas en promoción")
+        promo_store = (
+            df[df["is_promo"]]
+            .groupby("store_nbr", observed=False)["sales"]
+            .sum(min_count=1)
+            .sort_values(ascending=False)
+            .head(15)
+            .reset_index()
+            .rename(columns={"sales": "promo_sales"})
+        )
+        fig2 = px.bar(promo_store, x="store_nbr", y="promo_sales")
+        fig2.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig2, width="stretch")
+
+    st.markdown("---")
+
+    st.subheader("🧺 Familia líder por tienda (Top 20 tiendas por ventas)")
+    by_store_family = (
+        df.groupby(["store_nbr", "family"], observed=False)["sales"]
+        .sum(min_count=1)
+        .reset_index()
+    )
+    if not by_store_family.empty:
+        idx = by_store_family.groupby("store_nbr", observed=False)["sales"].idxmax()
+        best = by_store_family.loc[idx]
+        top20stores = (
+            df.groupby("store_nbr", observed=False)["sales"].sum(min_count=1)
+            .sort_values(ascending=False)
+            .head(20)
+            .index
+        )
+        best = best[best["store_nbr"].isin(top20stores)].sort_values("sales", ascending=False)
+        st.dataframe(
+            best.rename(columns={"family": "top_family", "sales": "top_family_sales"}),
+            width="stretch",
+            hide_index=True,
+        )
     else:
-        left, right = st.columns([0.35, 0.65], gap="large")
-
-        with left:
-            store_sel = st.selectbox("Selecciona una tienda", stores, index=0)
-            df_s = df_f[df_f["store_nbr"] == store_sel].copy()
-
-            st.markdown("<div class='card'>", unsafe_allow_html=True)
-            st.metric("📦 Ventas totales", fmt_float(df_s["sales"].sum(skipna=True)))
-            st.metric("🧾 Transacciones totales", fmt_float(df_s["transactions"].sum(skipna=True)))
-            st.metric("🏷️ Ventas en promo", fmt_float(df_s.loc[df_s["is_promo"], "sales"].sum(skipna=True)))
-            st.markdown("</div>", unsafe_allow_html=True)
-
-            st.markdown("")
-            st.subheader("🧩 Mix de familias (Top 8)")
-            # Pie -> BAR horizontal
-            mix = (
-                df_s.groupby("family", observed=False)["sales"]
-                .sum(min_count=1)
-                .sort_values(ascending=False)
-                .head(8)
-                .reset_index()
-            )
-            fig_mix = px.bar(mix, x="sales", y="family", orientation="h")
-            fig_mix.update_layout(height=330, margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(fig_mix, width="stretch")
-
-        with right:
-            st.subheader("📅 Ventas por año")
-            by_year = (
-                df_s.groupby("year", observed=False)["sales"]
-                .sum(min_count=1)
-                .reset_index()
-                .sort_values("year")
-            )
-            fig = px.bar(by_year, x="year", y="sales")
-            fig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(fig, width="stretch")
-
-            st.subheader("📈 Serie mensual (ventas)")
-            if df_s["date"].notna().any():
-                by_month = (
-                    df_s.dropna(subset=["date"])
-                    .set_index("date")["sales"]
-                    .resample("MS")
-                    .sum(min_count=1)
-                    .reset_index()
-                    .rename(columns={"sales": "sales_month"})
-                )
-                fig2 = px.line(by_month, x="date", y="sales_month", markers=True)
-                fig2.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10))
-                st.plotly_chart(fig2, width="stretch")
-            else:
-                st.info("No hay fechas válidas para construir la serie.")
-
+        st.info("No hay datos suficientes para esta tabla.")
 
 # -----------------------------
 # TAB 3
 # -----------------------------
 with tab3:
-    st.header("🗺️ Análisis por estado")
+    st.header("🗺️ Estados (rankings)")
 
-    states = sorted(df_f["state"].dropna().astype(str).unique().tolist())
-    if not states:
-        st.info("No hay estados disponibles.")
-    else:
-        cL, cR = st.columns([0.35, 0.65], gap="large")
+    c1, c2 = st.columns(2, gap="large")
 
-        with cL:
-            state_sel = st.selectbox("Selecciona un estado", states, index=0)
-            df_st = df_f[df_f["state"].astype(str) == state_sel].copy()
+    with c1:
+        st.subheader("🏆 Top 15 estados por ventas")
+        top_state = (
+            df.groupby("state", observed=False)["sales"]
+            .sum(min_count=1)
+            .sort_values(ascending=False)
+            .head(15)
+            .reset_index()
+        )
+        fig = px.bar(top_state, x="sales", y="state", orientation="h")
+        fig.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig, width="stretch")
 
-            st.markdown("<div class='card'>", unsafe_allow_html=True)
-            st.metric("🏬 Tiendas en el estado", fmt_int(safe_nunique(df_st["store_nbr"])))
-            st.metric("🧺 Familias vendidas", fmt_int(safe_nunique(df_st["family"])))
-            st.metric("📦 Ventas totales", fmt_float(df_st["sales"].sum(skipna=True)))
-            st.metric("🧾 Transacciones", fmt_float(df_st["transactions"].sum(skipna=True)))
-            st.markdown("</div>", unsafe_allow_html=True)
+    with c2:
+        st.subheader("🏬 Nº de tiendas por estado (Top 15)")
+        stores_state = (
+            df.dropna(subset=["state", "store_nbr"])
+            .groupby("state", observed=False)["store_nbr"]
+            .nunique()
+            .sort_values(ascending=False)
+            .head(15)
+            .reset_index()
+            .rename(columns={"store_nbr": "n_stores"})
+        )
+        fig2 = px.bar(stores_state, x="n_stores", y="state", orientation="h")
+        fig2.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig2, width="stretch")
 
-            st.markdown("")
-            top_f = (
-                df_st.groupby("family", observed=False)["sales"]
-                .sum(min_count=1)
-                .sort_values(ascending=False)
-                .head(1)
-            )
-            st.subheader("🥇 Familia líder")
-            if len(top_f) == 0:
-                st.write("—")
-            else:
-                st.success(f"**{top_f.index[0]}** · ventas: **{fmt_float(top_f.iloc[0])}**")
-
-        with cR:
-            st.subheader("📆 Transacciones por año")
-            tx_year = (
-                df_st.groupby("year", observed=False)["transactions"]
-                .sum(min_count=1)
-                .reset_index()
-                .sort_values("year")
-            )
-            fig = px.bar(tx_year, x="year", y="transactions")
-            fig.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(fig, width="stretch")
-
-            st.subheader("🏆 Top 10 tiendas por ventas (en el estado)")
-            top_store = (
-                df_st.groupby("store_nbr", observed=False)["sales"]
-                .sum(min_count=1)
-                .sort_values(ascending=False)
-                .head(10)
-                .reset_index()
-            )
-            fig2 = px.bar(top_store, x="store_nbr", y="sales")
-            fig2.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(fig2, width="stretch")
-
-            st.subheader("🧺 Familia más vendida por tienda (muestra)")
-            by_store_family = (
-                df_st.groupby(["store_nbr", "family"], observed=False)["sales"]
-                .sum(min_count=1)
-                .reset_index()
-            )
-            if not by_store_family.empty:
-                idx = by_store_family.groupby("store_nbr", observed=False)["sales"].idxmax()
-                best = by_store_family.loc[idx].sort_values("sales", ascending=False).head(15)
-                st.dataframe(
-                    best.rename(columns={"family": "top_family", "sales": "top_family_sales"}),
-                    width="stretch",
-                    hide_index=True,
-                )
-            else:
-                st.info("No hay datos suficientes para esta tabla.")
-
+    st.markdown("---")
+    st.subheader("🏷️ Top 10 familias por ventas en el Top 5 estados")
+    top5 = (
+        df.groupby("state", observed=False)["sales"]
+        .sum(min_count=1)
+        .sort_values(ascending=False)
+        .head(5)
+        .index
+    )
+    df5 = df[df["state"].isin(top5)]
+    fam5 = (
+        df5.groupby(["state", "family"], observed=False)["sales"]
+        .sum(min_count=1)
+        .reset_index()
+    )
+    # nos quedamos con top 10 familias globalmente dentro de los top 5 estados
+    top10_fams = (
+        fam5.groupby("family", observed=False)["sales"].sum(min_count=1)
+        .sort_values(ascending=False)
+        .head(10)
+        .index
+    )
+    fam5 = fam5[fam5["family"].isin(top10_fams)]
+    fig3 = px.bar(fam5, x="family", y="sales", color="state", barmode="group")
+    fig3.update_layout(height=380, margin=dict(l=10, r=10, t=10, b=10))
+    st.plotly_chart(fig3, width="stretch")
 
 # -----------------------------
 # TAB 4
@@ -389,7 +376,7 @@ with tab4:
     with a:
         st.subheader("📅 Ventas medias por día de la semana")
         dow = (
-            df_f.groupby("day_of_week", observed=False)["sales"]
+            df.groupby("day_of_week", observed=False)["sales"]
             .mean()
             .reset_index()
             .sort_values("day_of_week")
@@ -401,7 +388,7 @@ with tab4:
     with b:
         st.subheader("🗓️ Ventas medias por semana (promedio entre años)")
         weekly = (
-            df_f.dropna(subset=["year", "week"])
+            df.dropna(subset=["year", "week"])
             .groupby(["year", "week"], observed=False)["sales"]
             .sum(min_count=1)
             .reset_index()
@@ -419,7 +406,7 @@ with tab4:
     with c:
         st.subheader("📆 Ventas medias por mes (promedio entre años)")
         monthly = (
-            df_f.dropna(subset=["year", "month"])
+            df.dropna(subset=["year", "month"])
             .groupby(["year", "month"], observed=False)["sales"]
             .sum(min_count=1)
             .reset_index()
@@ -433,15 +420,3 @@ with tab4:
         fig3 = px.line(monthly_mean, x="month", y="sales", markers=True)
         fig3.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(fig3, width="stretch")
-
-    st.markdown("---")
-    st.subheader("🏷️ Promo vs No promo (ventas medias)")
-    promo_cmp = (
-        df_f.assign(promo=np.where(df_f["is_promo"], "Promo", "No promo"))
-        .groupby("promo", observed=False)["sales"]
-        .mean()
-        .reset_index()
-    )
-    fig4 = px.bar(promo_cmp, x="promo", y="sales")
-    fig4.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig4, width="stretch")
